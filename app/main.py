@@ -5,6 +5,9 @@ from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware  # <--- Import ajouté
 from dotenv import load_dotenv
+from app.database.database import engine, Base
+from app.database import models
+from app.routes.auth import router as auth_router
 
 from app.services.gemini_service import extraire_donnees_pdf
 from app.services.excel_service import generer_excel
@@ -12,6 +15,10 @@ from app.services.excel_service import generer_excel
 load_dotenv()
 
 app = FastAPI(title="Bank Statement Converter API")
+
+app.include_router(auth_router)
+
+Base.metadata.create_all(bind=engine)
 
 # <--- Configuration CORS obligatoire pour le dev local --->
 origins = [
