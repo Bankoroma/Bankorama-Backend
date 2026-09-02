@@ -1,0 +1,33 @@
+services:
+  # Service 1 : Base de données PostgreSQL
+  db:
+    image: postgres:15-alpine
+    container_name: gares_db
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgrespassword
+      POSTGRES_DB: gares_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  # Service 2 : API FastAPI
+  web:
+    build: .
+    container_name: gares_api
+    restart: always
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://postgres:postgrespassword@db:5432/gares_db
+    depends_on:
+      - db
+    volumes:
+      - ./app:/app/app
+
+volumes:
+  postgres_data:
