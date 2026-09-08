@@ -3,7 +3,7 @@ import bcrypt
 from datetime import datetime, timedelta, timezone
 from jose import jwt
 
-SECRET_KEY = os.getenv("SECRET_KEY", "change-moi-avec-une-vraie-valeur-en-env")
+SECRET_KEY = os.getenv("JWT_SECRET_KEY", "change-moi-avec-une-vraie-valeur-en-env")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60
 
@@ -26,3 +26,18 @@ def create_access_token(data: dict) -> str:
     expire = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     to_encode.update({"exp": expire})
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
+def create_email_verification_token(email: str) -> str:
+    expire = datetime.now(timezone.utc) + timedelta(hours=24)
+
+    data = {
+        "email": email,
+        "type": "email_verification",
+        "exp": expire,
+    }
+
+    return jwt.encode(
+        data,
+        SECRET_KEY,
+        algorithm=ALGORITHM
+    )
