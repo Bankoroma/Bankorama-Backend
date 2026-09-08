@@ -36,14 +36,14 @@ def generer_excel(data: dict, output_path: str) -> str:
     ws.title = "Relevé Extrait"
     ws.views.sheetView[0].showGridLines = True
 
-    # Bloc Entête
-    ws['B2'] = f"RELEVÉ BANCAIRE - {data.get('banque', 'N/C').upper()}"
-    ws['B2'].font = font_title
-    ws['B3'] = f"Titulaire : {data.get('titulaire', 'N/C')} | Période : {data.get('periode', 'N/C')}"
-    ws['B3'].font = font_subtitle
+    # # Bloc Entête
+    # ws['B2'] = f"RELEVÉ BANCAIRE - {data.get('banque', 'N/C').upper()}"
+    # ws['B2'].font = font_title
+    # ws['B3'] = f"Titulaire : {data.get('titulaire', 'N/C')} | Période : {data.get('periode', 'N/C')}"
+    # ws['B3'].font = font_subtitle
 
     # En-têtes du tableau
-    headers = ["Date opération", "Type de paiement", "Libellé / Description", "Débit (sortie)", "Crédit (entrée)"]
+    headers = ["Date de la Valeur", "Type de paiement", "Libellé / Description", "Débit (sortie)", "Crédit (entrée)"]
     start_row = 5
     start_col = 2
 
@@ -61,7 +61,7 @@ def generer_excel(data: dict, output_path: str) -> str:
     transactions = data.get("transactions", [])
 
     for idx, tx in enumerate(transactions):
-        c_date = ws.cell(row=current_row, column=2, value=tx.get("date_operation"))
+        c_date = ws.cell(row=current_row, column=2, value=tx.get("date_valeur"))
         c_type = ws.cell(row=current_row, column=3, value=tx.get("type_paiement"))
         c_lib = ws.cell(row=current_row, column=4, value=tx.get("libelle"))
         c_deb = ws.cell(row=current_row, column=5, value=tx.get("debit"))

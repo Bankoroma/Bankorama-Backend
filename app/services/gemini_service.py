@@ -12,7 +12,7 @@ ENV_PATH = BASE_DIR / ".env"
 load_dotenv(dotenv_path=ENV_PATH)
 
 class Transaction(BaseModel):
-    date_operation: str = Field(description="Date d'opération au format DD/MM/YYYY")
+    date_valeur: str = Field(description="Date valeur au format DD/MM/YYYY")
     libelle: str = Field(description="Description ou nature de la transaction")
     type_paiement: str = Field(description="Type : Virement, Carte, Retrait, Chèque, Frais, etc.")
     debit: float | None = Field(default=None, description="Montant du débit (sortie d'argent) ou null")
