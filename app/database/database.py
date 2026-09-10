@@ -16,7 +16,11 @@ DATABASE_URL = os.getenv(
 if not DATABASE_URL:
     raise ValueError("La variable d'environnement DATABASE_URL n'est pas définie.")
 
-engine = create_engine(DATABASE_URL)
+engine = create_engine(
+    DATABASE_URL,
+    pool_pre_ping=True,
+    pool_recycle=300,
+)
 
 SessionLocal = sessionmaker(
     autocommit=False,
