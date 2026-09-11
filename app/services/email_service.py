@@ -1,5 +1,6 @@
 import json
 import os
+import urllib.error
 import urllib.request
 
 
@@ -52,5 +53,15 @@ Ce lien est valable pendant 24 heures.
         method="POST",
     )
 
-    with urllib.request.urlopen(request, timeout=15) as response:
-        response.read()
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            response_body = response.read().decode("utf-8")
+            print("Resend success:", response_body)
+
+    except urllib.error.HTTPError as e:
+        error_body = e.read().decode("utf-8")
+
+        print("Resend status:", e.code)
+        print("Resend error:", error_body)
+
+        raise
