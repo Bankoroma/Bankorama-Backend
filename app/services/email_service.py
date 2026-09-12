@@ -49,6 +49,7 @@ Ce lien est valable pendant 24 heures.
         headers={
             "Authorization": f"Bearer {RESEND_API_KEY}",
             "Content-Type": "application/json",
+            "User-Agent": "Bankorama/1.0",
         },
         method="POST",
     )
