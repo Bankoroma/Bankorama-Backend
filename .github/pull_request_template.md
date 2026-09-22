@@ -12,6 +12,6 @@
 
 ## Checklist
 - [ ] Aucun secret, clé ou mot de passe dans le code
-- [ ] Aucune donnée réelle de relevé bancaire (IBAN, nom, montant) dans le code, les tests ou les logs
+- [ ] Aucune donnée réelle de relevé bancaire (IBAN, nom, montant) dans le code, les tests ou les logs !
 - [ ] Testé en local
 - [ ] Si changement d'API : PR liée dans l'autre dépôt (front ↔ back)
