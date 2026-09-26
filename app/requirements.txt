@@ -5,4 +5,5 @@ pydantic
 openpyxl
 python-multipart
 python-dotenv
+pypdf
 python-jose[cryptography]

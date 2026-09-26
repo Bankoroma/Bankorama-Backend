@@ -1,14 +1,20 @@
+import json
 import os
-import smtplib
-from email.message import EmailMessage
+import urllib.error
+import urllib.request
 
 
-SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
-SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+RESEND_API_KEY = os.getenv("RESEND_API_KEY")
 
-MAIL_USERNAME = os.getenv("MAIL_USERNAME")
-MAIL_PASSWORD = os.getenv("MAIL_PASSWORD")
-MAIL_FROM = os.getenv("MAIL_FROM")
+FRONTEND_URL = os.getenv(
+    "FRONTEND_URL",
+    "http://localhost:3002"
+)
+
+RESEND_FROM = os.getenv(
+    "RESEND_FROM",
+    "Bankorama <onboarding@resend.dev>"
+)
 
 
 def send_verification_email(
@@ -17,17 +23,14 @@ def send_verification_email(
     raison_sociale: str
 ):
     verification_url = (
-        f"http://localhost:3002/verify-email?token={token}"
+        f"{FRONTEND_URL}/verify-email?token={token}"
     )
 
-    message = EmailMessage()
-
-    message["Subject"] = "Vérification de votre compte Bankorama"
-    message["From"] = MAIL_FROM
-    message["To"] = to_email
-
-    message.set_content(
-        f"""
+    data = {
+        "from": RESEND_FROM,
+        "to": [to_email],
+        "subject": "Vérification de votre compte Bankorama",
+        "text": f"""
 Bonjour {raison_sociale},
 
 Merci de vous être inscrit sur Bankorama.
@@ -38,9 +41,28 @@ Cliquez sur le lien suivant pour vérifier votre adresse email :
 
 Ce lien est valable pendant 24 heures.
 """
+    }
+
+    request = urllib.request.Request(
+        "https://api.resend.com/emails",
+        data=json.dumps(data).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {RESEND_API_KEY}",
+            "Content-Type": "application/json",
+            "User-Agent": "Bankorama/1.0",
+        },
+        method="POST",
     )
 
-    with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
-        server.starttls()
-        server.login(MAIL_USERNAME, MAIL_PASSWORD)
-        server.send_message(message)
+    try:
+        with urllib.request.urlopen(request, timeout=15) as response:
+            response_body = response.read().decode("utf-8")
+            print("Resend success:", response_body)
+
+    except urllib.error.HTTPError as e:
+        error_body = e.read().decode("utf-8")
+
+        print("Resend status:", e.code)
+        print("Resend error:", error_body)
+
+        raise
