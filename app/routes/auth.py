@@ -6,6 +6,8 @@ from app.database.database import get_db
 from app.database.models import User
 from app.schemas.auth import RegisterRequest, LoginRequest, TokenResponse
 
+from app.security.dependencies import get_current_user
+
 from app.security.security import (
     hash_password,
     verify_password,
@@ -159,4 +161,13 @@ def verify_email(token: str, db: Session = Depends(get_db)):
 
     return {
         "message": "Adresse email vérifiée avec succès."
+    }
+
+@router.get("/me")
+def get_me(current_user: User = Depends(get_current_user)):
+    return {
+        "id": current_user.id,
+        "raison_sociale": current_user.raison_sociale,
+        "email": current_user.email,
+        "credits": current_user.credits,
     }
