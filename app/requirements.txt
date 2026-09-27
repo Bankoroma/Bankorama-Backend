@@ -7,3 +7,4 @@ python-multipart
 python-dotenv
 pypdf
 python-jose[cryptography]
+psycopg[binary]
