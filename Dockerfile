@@ -14,7 +14,11 @@ RUN pip install --upgrade pip \
 
 COPY app ./app
 
-RUN mkdir -p /app/temp
+RUN useradd --create-home --uid 10001 appuser \
+    && mkdir -p /app/temp \
+    && chown -R appuser:appuser /app/temp
+
+USER appuser
 
 EXPOSE 8000
 

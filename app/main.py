@@ -1,6 +1,8 @@
+import logging
 import os
-import shutil
+import re
 import unicodedata
+import uuid
 
 from fastapi import (
     FastAPI,
@@ -21,30 +23,47 @@ from pypdf import PdfReader
 
 from dotenv import load_dotenv
 
-from app.database.database import engine, Base, get_db
+load_dotenv()
+
+from app.database.database import get_db
 from app.database import models
+from app.database.migrations import run_migrations
 from app.routes.auth import router as auth_router
-from app.security.dependencies import get_current_user
+from app.routes.admin import router as admin_router
+from app.routes.conversions import router as conversions_router
+from app.routes.plans import router as plans_router
+from app.security.dependencies import require_active_subscription, require_admin
 
 from app.services.gemini_service import extraire_donnees_pdf
 from app.services.excel_service import generer_excel
 
 
-load_dotenv()
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("bankorama")
 
+# Swagger désactivable en production (ENABLE_DOCS=false)
+ENABLE_DOCS = os.getenv("ENABLE_DOCS", "true").lower() == "true"
 
-app = FastAPI(title="Bank Statement Converter API")
+app = FastAPI(
+    title="Bank Statement Converter API",
+    docs_url="/docs" if ENABLE_DOCS else None,
+    redoc_url="/redoc" if ENABLE_DOCS else None,
+    openapi_url="/openapi.json" if ENABLE_DOCS else None,
+)
 
 app.include_router(auth_router)
+app.include_router(plans_router)
+app.include_router(conversions_router)
+app.include_router(admin_router)
 
-Base.metadata.create_all(bind=engine)
+run_migrations()
 
 
 # --------------------------------------------------
 # CORS
 # --------------------------------------------------
 
-origins = [
+DEFAULT_ORIGINS = [
     "http://localhost:3000",
     "http://127.0.0.1:3000",
     "http://localhost:3002",
@@ -52,12 +71,25 @@ origins = [
     "https://bankorama-frontend-app.vercel.app",
 ]
 
+origins = [
+    origin.strip()
+    for origin in os.getenv("CORS_ORIGINS", ",".join(DEFAULT_ORIGINS)).split(",")
+    if origin.strip()
+]
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
+    # Sans ça le navigateur ne peut pas lire le nom du fichier ni les crédits consommés
+    expose_headers=[
+        "Content-Disposition",
+        "X-Credits-Consumed",
+        "X-Credits-Remaining",
+        "X-Pages-Processed",
+    ],
 )
 
 
@@ -69,6 +101,8 @@ TEMP_DIR = "temp"
 
 os.makedirs(TEMP_DIR, exist_ok=True)
 
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+
 
 # --------------------------------------------------
 # UTILITAIRES
@@ -76,9 +110,11 @@ os.makedirs(TEMP_DIR, exist_ok=True)
 
 def nettoyer_nom_fichier(filename: str) -> str:
     """
-    Supprime les accents et caractères spéciaux
-    du nom de fichier.
+    Nom affichable sûr : sans chemin, accents ni caractères spéciaux.
+    Il ne sert qu'au nom du fichier téléchargé, jamais au chemin disque.
     """
+
+    filename = filename.replace("\\", "/").rsplit("/", 1)[-1]
 
     nfkd = unicodedata.normalize("NFKD", filename)
 
@@ -87,7 +123,40 @@ def nettoyer_nom_fichier(filename: str) -> str:
         "ignore"
     ).decode("utf-8")
 
-    return ascii_str.replace(" ", "_")
+    ascii_str = re.sub(r"[^A-Za-z0-9._-]", "_", ascii_str).strip("._")
+
+    return ascii_str[:120] or "releve.pdf"
+
+
+def chemins_temporaires() -> tuple[str, str]:
+    """
+    Noms aléatoires : pas de path traversal via le nom envoyé
+    et pas de collision entre deux utilisateurs simultanés.
+    """
+
+    base = os.path.join(TEMP_DIR, uuid.uuid4().hex)
+
+    return base + ".pdf", base + ".xlsx"
+
+
+def sauvegarder_upload(file: UploadFile, chemin: str):
+    """
+    Copie le fichier envoyé en refusant tout ce qui dépasse 10 Mo.
+    """
+
+    total = 0
+
+    with open(chemin, "wb") as buffer:
+        while chunk := file.file.read(1024 * 1024):
+            total += len(chunk)
+
+            if total > MAX_UPLOAD_BYTES:
+                raise HTTPException(
+                    status_code=413,
+                    detail="Le fichier ne doit pas dépasser 10 Mo."
+                )
+
+            buffer.write(chunk)
 
 
 def supprimer_fichier(chemin: str):
@@ -100,9 +169,10 @@ def supprimer_fichier(chemin: str):
             os.remove(chemin)
 
         except Exception as e:
-            print(
-                f"Erreur lors de la suppression "
-                f"de {chemin}: {e}"
+            logger.warning(
+                "Erreur lors de la suppression de %s: %s",
+                chemin,
+                e
             )
 
 
@@ -110,7 +180,7 @@ def compter_pages_pdf(chemin: str) -> int:
     """
     Compte le nombre de pages du PDF.
 
-    1 page = 1 crédit = 0,10 €
+    1 page = 1 crédit
     """
 
     try:
@@ -146,13 +216,24 @@ def compter_pages_pdf(chemin: str) -> int:
         )
 
 
+def verifier_extension_pdf(file: UploadFile):
+    if not file.filename or not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(
+            status_code=400,
+            detail="Le fichier doit être un PDF."
+        )
+
+
 # --------------------------------------------------
 # ROOT
 # --------------------------------------------------
 
 @app.get("/")
 async def root():
-    return RedirectResponse(url="/docs")
+    if ENABLE_DOCS:
+        return RedirectResponse(url="/docs")
+
+    return {"status": "ok"}
 
 
 # --------------------------------------------------
@@ -161,36 +242,23 @@ async def root():
 
 @app.post("/api/v1/parse")
 async def parse_pdf(
-    file: UploadFile = File(...)
+    file: UploadFile = File(...),
+    admin=Depends(require_admin),
 ):
     """
     Analyse un PDF sans consommer de crédit.
 
-    Cette route reste gratuite.
+    Réservée aux administrateurs : ouverte à tous, elle permettait
+    d'appeler Gemini gratuitement et sans authentification.
     """
 
-    if not file.filename or not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(
-            status_code=400,
-            detail="Le fichier doit être un PDF."
-        )
+    verifier_extension_pdf(file)
 
-    safe_filename = nettoyer_nom_fichier(
-        file.filename
-    )
-
-    temp_pdf = os.path.join(
-        TEMP_DIR,
-        safe_filename
-    )
+    temp_pdf, _ = chemins_temporaires()
 
     try:
 
-        with open(temp_pdf, "wb") as buffer:
-            shutil.copyfileobj(
-                file.file,
-                buffer
-            )
+        sauvegarder_upload(file, temp_pdf)
 
         donnees = await extraire_donnees_pdf(
             temp_pdf
@@ -204,16 +272,17 @@ async def parse_pdf(
     except HTTPException:
         raise
 
-    except Exception as e:
+    except Exception:
+        logger.exception("Échec de l'analyse PDF")
+
         raise HTTPException(
             status_code=500,
-            detail=str(e)
+            detail="L'analyse du relevé a échoué."
         )
 
     finally:
 
-        if os.path.exists(temp_pdf):
-            os.remove(temp_pdf)
+        supprimer_fichier(temp_pdf)
 
 
 # --------------------------------------------------
@@ -222,60 +291,39 @@ async def parse_pdf(
 
 @app.post("/api/v1/convert-to-excel")
 async def convert_pdf_to_excel(
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
-    background_tasks: BackgroundTasks = None,
-    current_user=Depends(get_current_user),
+    current_user=Depends(require_active_subscription),
     db: Session = Depends(get_db)
 ):
     """
     Convertit un PDF en Excel.
 
-    Tarification :
-
-        1 page = 1 crédit
-        1 crédit = 0,10 €
-
-    Exemple :
-
-        10 pages = 10 crédits = 1 €
-        100 pages = 100 crédits = 10 €
-        250 pages = 250 crédits = 25 €
+    Tarification : 1 page = 1 crédit.
+    Les crédits sont rechargés chaque mois selon la formule.
     """
 
     # --------------------------------------------------
     # 1. Vérification extension
     # --------------------------------------------------
 
-    if not file.filename or not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(
-            status_code=400,
-            detail="Le fichier doit être un PDF."
-        )
+    verifier_extension_pdf(file)
 
     # --------------------------------------------------
-    # 2. Nom des fichiers temporaires
+    # 2. Nom des fichiers
     # --------------------------------------------------
 
-    safe_filename = nettoyer_nom_fichier(
-        file.filename
-    )
-
-    temp_pdf = os.path.join(
-        TEMP_DIR,
-        safe_filename
-    )
+    display_pdf = nettoyer_nom_fichier(file.filename)
 
     excel_filename = (
-        safe_filename.rsplit(".", 1)[0]
+        display_pdf.rsplit(".", 1)[0]
         + ".xlsx"
     )
 
-    temp_excel = os.path.join(
-        TEMP_DIR,
-        excel_filename
-    )
+    temp_pdf, temp_excel = chemins_temporaires()
 
     credits_debites = 0
+    page_count = 0
 
     try:
 
@@ -283,11 +331,7 @@ async def convert_pdf_to_excel(
         # 3. Sauvegarde temporaire du PDF
         # --------------------------------------------------
 
-        with open(temp_pdf, "wb") as buffer:
-            shutil.copyfileobj(
-                file.file,
-                buffer
-            )
+        sauvegarder_upload(file, temp_pdf)
 
         # --------------------------------------------------
         # 4. Compter les pages
@@ -330,10 +374,6 @@ async def convert_pdf_to_excel(
                     "message": "Crédits insuffisants.",
                     "credits_required": credits_required,
                     "credits_available": current_user.credits,
-                    "price_euros": round(
-                        credits_required * 0.10,
-                        2
-                    )
                 }
             )
 
@@ -359,23 +399,37 @@ async def convert_pdf_to_excel(
         )
 
         # --------------------------------------------------
-        # 8. Nettoyage après téléchargement
+        # 8. Historique
         # --------------------------------------------------
 
-        if background_tasks:
-
-            background_tasks.add_task(
-                supprimer_fichier,
-                temp_pdf
+        db.add(
+            models.Conversion(
+                user_id=current_user.id,
+                filename=display_pdf,
+                pages=page_count,
+                credits_used=credits_debites,
+                status="success",
             )
-
-            background_tasks.add_task(
-                supprimer_fichier,
-                temp_excel
-            )
+        )
+        db.commit()
+        db.refresh(current_user)
 
         # --------------------------------------------------
-        # 9. Retour du fichier
+        # 9. Nettoyage après téléchargement
+        # --------------------------------------------------
+
+        background_tasks.add_task(
+            supprimer_fichier,
+            temp_pdf
+        )
+
+        background_tasks.add_task(
+            supprimer_fichier,
+            temp_excel
+        )
+
+        # --------------------------------------------------
+        # 10. Retour du fichier
         # --------------------------------------------------
 
         return FileResponse(
@@ -389,6 +443,9 @@ async def convert_pdf_to_excel(
                 "X-Credits-Consumed": str(
                     credits_debites
                 ),
+                "X-Credits-Remaining": str(
+                    current_user.credits
+                ),
                 "X-Pages-Processed": str(
                     page_count
                 )
@@ -396,19 +453,26 @@ async def convert_pdf_to_excel(
         )
 
     except HTTPException:
+        supprimer_fichier(temp_pdf)
+        supprimer_fichier(temp_excel)
         raise
 
-    except Exception as e:
+    except Exception:
+
+        logger.exception(
+            "Échec de conversion pour user %s",
+            current_user.id
+        )
 
         # --------------------------------------------------
-        # 10. Remboursement si erreur
+        # 11. Remboursement si erreur
         # --------------------------------------------------
+
+        db.rollback()
 
         if credits_debites > 0:
 
             try:
-
-                db.rollback()
 
                 db.execute(
                     update(models.User)
@@ -425,36 +489,48 @@ async def convert_pdf_to_excel(
 
                 db.commit()
 
-                print(
-                    f"Remboursement de "
-                    f"{credits_debites} crédits "
-                    f"pour user {current_user.id}"
+                logger.info(
+                    "Remboursement de %s crédits pour user %s",
+                    credits_debites,
+                    current_user.id
                 )
 
-            except Exception as refund_error:
+            except Exception:
 
                 db.rollback()
 
-                print(
-                    "ERREUR REMBOURSEMENT : "
-                    f"{refund_error}"
+                logger.exception("ERREUR REMBOURSEMENT")
+
+        try:
+            db.add(
+                models.Conversion(
+                    user_id=current_user.id,
+                    filename=display_pdf,
+                    pages=page_count,
+                    credits_used=0,
+                    status="failed",
                 )
+            )
+            db.commit()
+
+        except Exception:
+            db.rollback()
 
         # --------------------------------------------------
-        # 11. Nettoyage fichiers
+        # 12. Nettoyage fichiers
         # --------------------------------------------------
 
-        if os.path.exists(temp_pdf):
-            os.remove(temp_pdf)
-
-        if os.path.exists(temp_excel):
-            os.remove(temp_excel)
+        supprimer_fichier(temp_pdf)
+        supprimer_fichier(temp_excel)
 
         # --------------------------------------------------
-        # 12. Erreur API
+        # 13. Erreur API (détail interne journalisé, pas exposé)
         # --------------------------------------------------
 
         raise HTTPException(
             status_code=500,
-            detail=str(e)
+            detail=(
+                "La conversion a échoué. "
+                "Vos crédits ont été remboursés."
+            )
         )

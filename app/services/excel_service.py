@@ -30,6 +30,17 @@ align_left = Alignment(horizontal="left", vertical="center")
 align_right = Alignment(horizontal="right", vertical="center")
 
 
+def _cellule_texte(ws, row, column, valeur):
+    """
+    Neutralise l'injection de formules : openpyxl écrit toute chaîne
+    commençant par "=" comme une formule exécutée à l'ouverture.
+    """
+    cell = ws.cell(row=row, column=column, value=valeur)
+    if isinstance(valeur, str):
+        cell.data_type = "s"
+    return cell
+
+
 def generer_excel(data: dict, output_path: str) -> str:
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -61,9 +72,9 @@ def generer_excel(data: dict, output_path: str) -> str:
     transactions = data.get("transactions", [])
 
     for idx, tx in enumerate(transactions):
-        c_date = ws.cell(row=current_row, column=2, value=tx.get("date_valeur"))
-        c_type = ws.cell(row=current_row, column=3, value=tx.get("type_paiement"))
-        c_lib = ws.cell(row=current_row, column=4, value=tx.get("libelle"))
+        c_date = _cellule_texte(ws, current_row, 2, tx.get("date_valeur"))
+        c_type = _cellule_texte(ws, current_row, 3, tx.get("type_paiement"))
+        c_lib = _cellule_texte(ws, current_row, 4, tx.get("libelle"))
         c_deb = ws.cell(row=current_row, column=5, value=tx.get("debit"))
         c_cre = ws.cell(row=current_row, column=6, value=tx.get("credit"))
 
