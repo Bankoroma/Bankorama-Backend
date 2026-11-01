@@ -58,3 +58,5 @@ wheels/
 .DS_Store?
 ._*
 Thumbs.db
+# Surcharges locales (ports, secrets de dev)
+docker-compose.override.yml

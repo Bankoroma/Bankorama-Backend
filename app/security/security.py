@@ -3,9 +3,15 @@ import bcrypt
 from datetime import datetime, timedelta, timezone
 from jose import jwt
 
-SECRET_KEY = os.getenv("JWT_SECRET_KEY", "change-moi-avec-une-vraie-valeur-en-env")
+SECRET_KEY = os.getenv("JWT_SECRET_KEY")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 60
+
+# Sans secret fort, n'importe qui pourrait forger un token valide
+if not SECRET_KEY or len(SECRET_KEY) < 32:
+    raise ValueError(
+        "JWT_SECRET_KEY doit être défini dans l'environnement (32 caractères minimum)."
+    )
 
 
 def hash_password(password: str) -> str:
@@ -24,20 +30,5 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
 def create_access_token(data: dict) -> str:
     to_encode = data.copy()
     expire = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    to_encode.update({"exp": expire})
+    to_encode.update({"exp": expire, "type": "access"})
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-
-def create_email_verification_token(email: str) -> str:
-    expire = datetime.now(timezone.utc) + timedelta(hours=24)
-
-    data = {
-        "email": email,
-        "type": "email_verification",
-        "exp": expire,
-    }
-
-    return jwt.encode(
-        data,
-        SECRET_KEY,
-        algorithm=ALGORITHM
-    )

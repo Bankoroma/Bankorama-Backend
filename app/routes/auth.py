@@ -1,23 +1,22 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, status
+from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.orm import Session
-from jose import jwt, JWTError
 
 from app.database.database import get_db
 from app.database.models import User
-from app.schemas.auth import RegisterRequest, LoginRequest, TokenResponse
+from app.schemas.auth import RegisterRequest, LoginRequest, TokenResponse, MeOut
 
 from app.security.dependencies import get_current_user
+from app.security.rate_limit import client_ip, login_limiter, register_limiter
 
 from app.security.security import (
     hash_password,
     verify_password,
     create_access_token,
-    create_email_verification_token,
-    SECRET_KEY,
-    ALGORITHM,
 )
 
-from app.services.email_service import send_verification_email
+from app.services.email_service import send_registration_email
 
 
 
@@ -26,9 +25,18 @@ router = APIRouter(
     tags=["Authentication"]
 )
 
+# Hash factice : la vérification prend le même temps que l'email existe ou non
+_DUMMY_HASH = hash_password("dummy-password-for-timing")
+
 
 @router.post("/register")
-def register(user_data: RegisterRequest, db: Session = Depends(get_db)):
+def register(
+    user_data: RegisterRequest,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    register_limiter.hit(client_ip(request))
 
     if user_data.password != user_data.confirm_password:
         raise HTTPException(
@@ -66,108 +74,91 @@ def register(user_data: RegisterRequest, db: Session = Depends(get_db)):
             detail="Le mot de passe doit contenir au moins un caractère spécial."
         )
 
-    existing_user = db.query(User).filter(
-        User.email == user_data.email
-    ).first()
+    # Création via fonction SQL SECURITY DEFINER : le rôle applicatif
+    # n'a aucun droit INSERT direct sur users (RLS)
+    try:
+        new_user_id = db.execute(
+            text("SELECT auth_register_user(:rs, :email, :pwd, :plan)"),
+            {
+                "rs": user_data.raison_sociale.strip(),
+                "email": user_data.email,
+                "pwd": hash_password(user_data.password),
+                "plan": user_data.plan_code,
+            },
+        ).scalar_one()
+        db.commit()
 
-    if existing_user:
+    except IntegrityError:
+        db.rollback()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Un utilisateur avec cet email existe déjà."
         )
 
-    new_user = User(
-        raison_sociale=user_data.raison_sociale,
-        email=user_data.email,
-        hashed_password=hash_password(user_data.password),
-    )
+    except DBAPIError as e:
+        db.rollback()
+        if getattr(e.orig, "sqlstate", None) == "22023":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Formule d'abonnement inconnue."
+            )
+        raise
 
-    db.add(new_user)
-    db.commit()
-    db.refresh(new_user)
+    plan_name = db.execute(
+        text("SELECT name FROM plans WHERE code = :c"),
+        {"c": user_data.plan_code},
+    ).scalar_one()
 
-    verification_token = create_email_verification_token(new_user.email)
-
-    send_verification_email(
-        new_user.email,
-        verification_token,
-        new_user.raison_sociale
+    background_tasks.add_task(
+        send_registration_email,
+        user_data.email,
+        user_data.raison_sociale.strip(),
+        plan_name,
     )
 
     return {
-        "message": "Compte créé avec succès",
+        "message": "Compte créé. Votre abonnement est en attente d'activation.",
         "user": {
-            "id": new_user.id,
-            "email": new_user.email,
+            "id": new_user_id,
+            "email": user_data.email.lower(),
         }
     }
-@router.post("/login", response_model=TokenResponse)
-def login(user_data: LoginRequest, db: Session = Depends(get_db)):
-    user = db.query(User).filter(User.email == user_data.email).first()
 
-    if not user or not verify_password(user_data.password, user.hashed_password):
+
+@router.post("/login", response_model=TokenResponse)
+def login(user_data: LoginRequest, request: Request, db: Session = Depends(get_db)):
+    login_limiter.hit(f"{client_ip(request)}:{user_data.email.lower()}")
+
+    row = db.execute(
+        text("SELECT id, hashed_password, is_active FROM auth_find_user(:email)"),
+        {"email": user_data.email},
+    ).first()
+
+    password_ok = verify_password(
+        user_data.password,
+        row.hashed_password if row else _DUMMY_HASH,
+    )
+
+    if not row or not password_ok:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Email ou mot de passe incorrect.",
         )
 
-    if not user.is_verified:
+    if not row.is_active:
         raise HTTPException(
-        status_code=status.HTTP_403_FORBIDDEN,
-        detail="Veuillez vérifier votre adresse email avant de vous connecter.",
-    )
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Compte désactivé.",
+        )
 
-    access_token = create_access_token(data={"sub": str(user.id)})
+    access_token = create_access_token(data={"sub": str(row.id)})
 
     return {
         "access_token": access_token,
         "token_type": "bearer",
     }
 
-@router.get("/verify-email")
-def verify_email(token: str, db: Session = Depends(get_db)):
-    try:
-        payload = jwt.decode(
-            token,
-            SECRET_KEY,
-            algorithms=[ALGORITHM]
-        )
 
-        email = payload.get("email")
-        token_type = payload.get("type")
-
-        if not email or token_type != "email_verification":
-            raise HTTPException(
-                status_code=400,
-                detail="Token de vérification invalide."
-            )
-
-    except JWTError:
-        raise HTTPException(
-            status_code=400,
-            detail="Token de vérification invalide ou expiré."
-        )
-
-    user = db.query(User).filter(User.email == email).first()
-
-    if not user:
-        raise HTTPException(
-            status_code=404,
-            detail="Utilisateur introuvable."
-        )
-
-    user.is_verified = True
-    db.commit()
-
-    return {
-        "message": "Adresse email vérifiée avec succès."
-    }
-
-@router.get("/me")
+@router.get("/me", response_model=MeOut)
 def get_me(current_user: User = Depends(get_current_user)):
-    return {
-        "id": current_user.id,
-        "raison_sociale": current_user.raison_sociale,
-        "email": current_user.email,
-        "credits": current_user.credits,
-    }
+    return current_user
